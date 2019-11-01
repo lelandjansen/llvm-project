@@ -28,6 +28,12 @@
 #include <zircon/syscalls.h>
 #endif
 
+// TODO(ljansen): if mach-o
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach/vm_map.h>
+#include <mach/mach_init.h>
+
 #include "sanitizer_common/sanitizer_addrhashmap.h"
 #include "sanitizer_common/sanitizer_common.h"
 
@@ -108,7 +114,7 @@ public:
 #endif
   }
 
-  int MakeWriteable() XRAY_NEVER_INSTRUMENT {
+  int MakeWritable() XRAY_NEVER_INSTRUMENT {
 #if SANITIZER_FUCHSIA
     auto R = __sanitizer_change_code_protection(
         reinterpret_cast<uintptr_t>(PageAlignedAddr), MProtectLen, true);
@@ -120,11 +126,66 @@ public:
     MustCleanup = true;
     return 0;
 #else
-    auto R = mprotect(PageAlignedAddr, MProtectLen,
-                      PROT_READ | PROT_WRITE | PROT_EXEC);
-    if (R != -1)
+    // const auto pagesize = 4096ull;
+    // // struct alignas(4096) S {} XRAY_NEVER_INSTRUMENT;
+    // // S s();
+    // // auto R = mprotect((void*)(&s), 4096, (int)(PROT_READ | PROT_WRITE | PROT_EXEC));
+    // // printf("&x: %llu\n", &s);
+    // // printf("&x mod 64: %llu\n", (unsigned long long)(&s) % 64ull);
+    // // // printf("sizeof(x): %llu\n", sizeof(s));
+    // printf("PageAlignedAddr: %llu\n", PageAlignedAddr);
+    // printf("PageAlignedAddr mod %llu: %llu\n", pagesize, (unsigned long long)PageAlignedAddr % pagesize);
+    // printf("MProtectLen mod %llu: %llu\n", pagesize, (unsigned long long)MProtectLen % pagesize);
+    // printf("MProtectLen: %lu\n", MProtectLen);
+    
+
+    // http://web.mit.edu/darwin/src/modules/xnu/osfmk/man/vm_map.html
+    auto P = vm_map(
+        mach_task_self(), // target_task
+        (vm_address_t*)PageAlignedAddr, // address
+        MProtectLen, // size
+        0x1111, // address mask 4096 which is the page size == 0x1000 so we want to mask the first four bits???
+        true, // anywhere. is this okay???
+        MEMORY_OBJECT_NULL, // memory_object. is this okay???
+        0, // offset
+        false, // copy
+        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, // current protection
+        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, // maximum protection
+        VM_INHERIT_SHARE //  inheritance. is this okay???
+    );
+    if (P == KERN_NO_SPACE) {
+      Report("KERN_NO_SPACE: There is not enough space in the task's address space to allocate the new region for the memory object.");
+    } else if (P == KERN_PROTECTION_FAILURE) {
+      Report("KERN_PROTECTION_FAILURE: max_protection or cur_protection exceeds that permitted by memory_object.");
+    } else if (P ==  KERN_INVALID_OBJECT ) {
+      Report("KERN_INVALID_OBJECT: The memory manager failed to map the memory object.");
+    } else {
+      Report("SOME OTHER ERROR %d", P);
+    }
+
+
+
+
+    Report("________________________________________\n");
+    auto Q = vm_protect(mach_task_self(), (vm_address_t)PageAlignedAddr, MProtectLen, false, /*VM_PROT_ALL*/VM_PROT_WRITE);
+    if (Q == KERN_SUCCESS) {
+      Report("--------------- success!!!\n");
+    } else if (Q == KERN_INVALID_ADDRESS) {
+      Report("--------------- invalid address\n");
       MustCleanup = true;
-    return R;
+    } else if (Q == KERN_PROTECTION_FAILURE) {
+      Report("--------------- protection failure\n");
+      MustCleanup = true;
+    } else {
+      Report("--------------- something else\n");
+      MustCleanup = true;
+    }
+    return Q;
+    // auto R = mprotect(PageAlignedAddr, MProtectLen,
+    //                   PROT_READ | PROT_WRITE | PROT_EXEC);
+    // if (R != -1)
+    //   MustCleanup = true;
+    // return R;
 #endif
   }
 
@@ -138,7 +199,17 @@ public:
                _zx_status_get_string(R));
       }
 #else
-      mprotect(PageAlignedAddr, MProtectLen, PROT_READ | PROT_EXEC);
+      auto Q = vm_protect(mach_task_self(), (vm_address_t)PageAlignedAddr, MProtectLen, false, VM_PROT_READ | VM_PROT_EXECUTE);
+      if (Q == KERN_SUCCESS) {
+        Report("--------------- success!!!\n");
+      } else if (Q == KERN_INVALID_ADDRESS) {
+        Report("--------------- invalid address\n");
+      } else if (Q == KERN_PROTECTION_FAILURE) {
+        Report("--------------- protection failure\n");
+      } else {
+        Report("--------------- something else\n");
+      }
+      // mprotect(PageAlignedAddr, MProtectLen, PROT_READ | PROT_EXEC);
 #endif
     }
   }
@@ -224,6 +295,8 @@ XRayPatchingStatus patchFunction(int32_t FuncId,
   return XRayPatchingStatus::SUCCESS;
 }
 
+#include <cstdio>
+
 // controlPatching implements the common internals of the patching/unpatching
 // implementation. |Enable| defines whether we're enabling or disabling the
 // runtime XRay instrumentation.
@@ -250,6 +323,10 @@ XRayPatchingStatus controlPatching(bool Enable) XRAY_NEVER_INSTRUMENT {
     SpinMutexLock Guard(&XRayInstrMapMutex);
     InstrMap = XRayInstrMap;
   }
+
+  printf("entries: %zu\n", InstrMap.Entries);
+  printf("functions: %zu\n", InstrMap.Functions);
+
   if (InstrMap.Entries == 0)
     return XRayPatchingStatus::NOT_INITIALIZED;
 
@@ -287,8 +364,8 @@ XRayPatchingStatus controlPatching(bool Enable) XRAY_NEVER_INSTRUMENT {
   size_t MProtectLen =
       (MaxSled.Address - reinterpret_cast<uptr>(PageAlignedAddr)) + cSledLength;
   MProtectHelper Protector(PageAlignedAddr, MProtectLen, PageSize);
-  if (Protector.MakeWriteable() == -1) {
-    Report("Failed mprotect: %d\n", errno);
+  if (Protector.MakeWritable() == -1) {
+    Report("Failed mprotect: %s\n", strerror(errno));
     return XRayPatchingStatus::FAILED;
   }
 
@@ -352,8 +429,8 @@ XRayPatchingStatus mprotectAndPatchFunction(int32_t FuncId,
   size_t MProtectLen =
       (MaxSled.Address - reinterpret_cast<uptr>(PageAlignedAddr)) + cSledLength;
   MProtectHelper Protector(PageAlignedAddr, MProtectLen, PageSize);
-  if (Protector.MakeWriteable() == -1) {
-    Report("Failed mprotect: %d\n", errno);
+  if (Protector.MakeWritable() == -1) {
+    Report("Failed mprotect: %s\n", strerror(errno));
     return XRayPatchingStatus::FAILED;
   }
   return patchFunction(FuncId, Enable);

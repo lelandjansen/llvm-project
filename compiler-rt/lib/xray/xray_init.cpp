@@ -22,22 +22,31 @@
 
 extern "C" {
 void __xray_init();
-extern const XRaySledEntry __start_xray_instr_map[] __attribute__((weak));
-extern const XRaySledEntry __stop_xray_instr_map[] __attribute__((weak));
-extern const XRayFunctionSledIndex __start_xray_fn_idx[] __attribute__((weak));
-extern const XRayFunctionSledIndex __stop_xray_fn_idx[] __attribute__((weak));
+// extern const XRaySledEntry __start_xray_instr_map[] __attribute__((weak));
+// extern const XRaySledEntry __stop_xray_instr_map[] __attribute__((weak));
+// extern const XRayFunctionSledIndex __start_xray_fn_idx[] __attribute__((weak));
+// extern const XRayFunctionSledIndex __stop_xray_fn_idx[] __attribute__((weak));
 
 #if SANITIZER_MAC
-// HACK: This is a temporary workaround to make XRay build on 
-// Darwin, but it will probably not work at runtime.
-const XRaySledEntry __start_xray_instr_map[] = {};
-extern const XRaySledEntry __stop_xray_instr_map[] = {};
-extern const XRayFunctionSledIndex __start_xray_fn_idx[] = {};
-extern const XRayFunctionSledIndex __stop_xray_fn_idx[] = {};
+// // HACK: This is a temporary workaround to make XRay build on 
+// // Darwin, but it will probably not work at runtime.
+// const XRaySledEntry __start_xray_instr_map[] = {};
+// extern const XRaySledEntry __stop_xray_instr_map[] = {};
+// extern const XRayFunctionSledIndex __start_xray_fn_idx[] = {};
+// extern const XRayFunctionSledIndex __stop_xray_fn_idx[] = {};
+
+#define SECTION_START "section$start$__DATA$"
+#define SECTION_END "section$end$__DATA$"
+extern const XRaySledEntry __start_xray_instr_map[] __asm(SECTION_START "xray_instr_map");
+extern const XRaySledEntry __stop_xray_instr_map[] __asm(SECTION_END "xray_instr_map");
+extern const XRayFunctionSledIndex __start_xray_fn_idx[] __asm(SECTION_START "xray_fn_idx");
+extern const XRayFunctionSledIndex __stop_xray_fn_idx[] __asm(SECTION_END "xray_fn_idx");
 #endif
 }
 
 using namespace __xray;
+
+#include <stdio.h>
 
 // When set to 'true' this means the XRay runtime has been initialised. We use
 // the weak symbols defined above (__start_xray_inst_map and
@@ -73,6 +82,15 @@ void __xray_init() XRAY_NEVER_INSTRUMENT {
     initializeFlags();
     atomic_store(&XRayFlagsInitialized, true, memory_order_release);
   }
+
+  printf("__start_xray_instr_map: %p\n", __start_xray_instr_map);
+  // printf("*__start_xray_instr_map: %p\n", *__start_xray_instr_map);
+  printf("__stop_xray_instr_map: %p\n", __stop_xray_instr_map);
+  // printf("*__stop_xray_instr_map: %p\n", *__stop_xray_instr_map);
+  printf("__start_xray_fn_idx: %p\n", __start_xray_fn_idx);
+  // printf("*__start_xray_fn_idx: %p\n", *__start_xray_fn_idx);
+  printf("__stop_xray_fn_idx: %p\n", __stop_xray_fn_idx);
+  // printf("*__stop_xray_fn_idx: %p\n", *__stop_xray_fn_idx);
 
   if (__start_xray_instr_map == nullptr) {
     if (Verbosity())
