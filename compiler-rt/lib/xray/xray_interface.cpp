@@ -250,6 +250,10 @@ XRayPatchingStatus controlPatching(bool Enable) XRAY_NEVER_INSTRUMENT {
     SpinMutexLock Guard(&XRayInstrMapMutex);
     InstrMap = XRayInstrMap;
   }
+
+  printf("entries: %zu\n", InstrMap.Entries);
+  printf("functions: %zu\n", InstrMap.Functions);
+
   if (InstrMap.Entries == 0)
     return XRayPatchingStatus::NOT_INITIALIZED;
 
